@@ -3795,7 +3795,24 @@ async fn send_chiral_transaction(
             .ok_or("No private key available. Please log in again.")?
     };
 
-    let tx_hash = ethereum::send_transaction(&account, &to_address, amount, &private_key).await?;
+    // Send transaction and get both hash and signed transaction
+    let (tx_hash, signed_tx) = ethereum::send_transaction_with_broadcast(&account, &to_address, amount, &private_key).await?;
+
+    // Broadcast transaction to all connected DHT peers
+    let dht_guard = state.dht.lock().await;
+    if let Some(ref dht) = *dht_guard {
+        match dht.broadcast_transaction(tx_hash.clone(), signed_tx).await {
+            Ok(_) => {
+                info!("✅ Transaction {} broadcast to DHT peers", tx_hash);
+            }
+            Err(e) => {
+                warn!("⚠️ Failed to broadcast transaction {} to DHT peers: {}", tx_hash, e);
+                // Don't fail the entire transaction if broadcast fails
+            }
+        }
+    } else {
+        warn!("⚠️ DHT not available, transaction {} not broadcast to peers", tx_hash);
+    }
 
     Ok(tx_hash)
 }

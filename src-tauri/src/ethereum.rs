@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use hex;
 
 //Structs
 #[derive(Debug, Serialize, Deserialize)]
@@ -1296,6 +1297,17 @@ pub async fn send_transaction(
     amount_chiral: f64,
     private_key: &str,
 ) -> Result<String, String> {
+    let (tx_hash, _) = send_transaction_with_broadcast(from_address, to_address, amount_chiral, private_key).await?;
+    Ok(tx_hash)
+}
+
+/// Send transaction and return both hash and signed transaction for broadcasting
+pub async fn send_transaction_with_broadcast(
+    from_address: &str,
+    to_address: &str,
+    amount_chiral: f64,
+    private_key: &str,
+) -> Result<(String, String), String> {
     let private_key_clean = private_key.strip_prefix("0x").unwrap_or(private_key);
 
     let wallet: LocalWallet = private_key_clean
@@ -1315,8 +1327,6 @@ pub async fn send_transaction(
 
     let chain_id = 98765u64;
     let wallet = wallet.with_chain_id(chain_id);
-
-    let client = SignerMiddleware::new(provider.clone(), wallet);
 
     let to: Address = to_address
         .parse()
@@ -1347,16 +1357,53 @@ pub async fn send_transaction(
         .value(amount_wei)
         .gas(21000)
         .gas_price(gas_price_adjusted)
-        .nonce(nonce);
+        .nonce(nonce)
+        .chain_id(chain_id);
 
-    let pending_tx = client
-        .send_transaction(tx, None)
+    // Sign the transaction to get raw bytes
+    let signature = wallet
+        .sign_transaction(&tx.clone().into())
         .await
-        .map_err(|e| format!("Failed to send transaction: {}", e))?;
+        .map_err(|e| format!("Failed to sign transaction: {}", e))?;
 
-    let tx_hash = format!("{:?}", pending_tx.tx_hash());
+    // Encode the signed transaction
+    let signed_tx = tx.rlp_signed(&signature);
+    let signed_tx_hex = format!("0x{}", hex::encode(&signed_tx));
 
-    Ok(tx_hash)
+    // Send raw transaction to Geth
+    let client = reqwest::Client::new();
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_sendRawTransaction",
+        "params": [signed_tx_hex.clone()],
+        "id": 1
+    });
+
+    let response = client
+        .post("http://127.0.0.1:8545")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send transaction to Geth: {}", e))?;
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Geth response: {}", e))?;
+
+    // Check for errors in response
+    if let Some(error) = json.get("error") {
+        return Err(format!("Geth error: {:?}", error));
+    }
+
+    // Extract transaction hash from result
+    let tx_hash = json
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or("No transaction hash in Geth response")?
+        .to_string();
+
+    Ok((tx_hash, signed_tx_hex))
 }
 
 /// Fetches the full details of a block by its number.
