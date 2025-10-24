@@ -252,6 +252,45 @@ struct AppState {
     relay_aliases: Arc<Mutex<std::collections::HashMap<String, String>>>,
 }
 
+/// Forward a signed transaction to the local Geth node
+async fn forward_transaction_to_geth(signed_tx: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    
+    // Prepare eth_sendRawTransaction RPC call
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_sendRawTransaction",
+        "params": [signed_tx],
+        "id": 1
+    });
+    
+    let response = client
+        .post("http://127.0.0.1:8545")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send transaction to Geth: {}", e))?;
+    
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Geth response: {}", e))?;
+    
+    // Check for errors in response
+    if let Some(error) = json.get("error") {
+        return Err(format!("Geth error: {:?}", error));
+    }
+    
+    // Extract transaction hash from result
+    let tx_hash = json
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or("No transaction hash in Geth response")?
+        .to_string();
+    
+    Ok(tx_hash)
+}
+
 #[tauri::command]
 async fn create_chiral_account(state: State<'_, AppState>) -> Result<EthAccount, String> {
     let account = create_new_account()?;
@@ -1208,6 +1247,25 @@ async fn start_dht_node(
                             println!("✅ Payment notification forwarded to frontend");
                         }
                     },
+                    DhtEvent::TransactionReceived { from_peer, tx_hash, signed_tx } => {
+                        info!("📡 Received transaction broadcast from {}: {}", from_peer, tx_hash);
+                        
+                        // Forward the transaction to local Geth node
+                        match forward_transaction_to_geth(&signed_tx).await {
+                            Ok(_) => {
+                                info!("✅ Transaction {} forwarded to local Geth", tx_hash);
+                                let payload = serde_json::json!({
+                                    "txHash": tx_hash,
+                                    "fromPeer": from_peer,
+                                    "status": "forwarded"
+                                });
+                                let _ = app_handle.emit("transaction_received", payload);
+                            }
+                            Err(e) => {
+                                error!("❌ Failed to forward transaction {} to Geth: {}", tx_hash, e);
+                            }
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -1550,6 +1608,9 @@ async fn get_dht_events(state: State<'_, AppState>) -> Result<Vec<String>, Strin
                 },
                 DhtEvent::PaymentNotificationReceived { from_peer, payload } => {
                     format!("payment_notification_received:{}:{:?}", from_peer, payload)
+                },
+                DhtEvent::TransactionReceived { from_peer, tx_hash, .. } => {
+                    format!("transaction_received:{}:{}", from_peer, tx_hash)
                 },
                 DhtEvent::ReputationEvent {
                     peer_id,
@@ -3740,6 +3801,21 @@ async fn send_chiral_transaction(
 }
 
 #[tauri::command]
+async fn broadcast_transaction(
+    state: State<'_, AppState>,
+    tx_hash: String,
+    signed_tx: String,
+) -> Result<(), String> {
+    let dht_guard = state.dht.lock().await;
+    if let Some(ref dht) = *dht_guard {
+        dht.broadcast_transaction(tx_hash, signed_tx).await?;
+        Ok(())
+    } else {
+        Err("DHT service not available".to_string())
+    }
+}
+
+#[tauri::command]
 async fn queue_transaction(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -4115,6 +4191,7 @@ fn main() {
             pool::update_pool_discovery,
             get_disk_space,
             send_chiral_transaction,
+            broadcast_transaction,
             queue_transaction,
             get_transaction_queue_status,
             get_cpu_temperature,

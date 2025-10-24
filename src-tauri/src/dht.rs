@@ -66,6 +66,70 @@ impl rr::Codec for KeyRequestCodec {
         write_framed(io, data).await
     }
 }
+
+// ------ Transaction Broadcast Protocol Implementation ------
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionBroadcastProtocol;
+
+impl AsRef<str> for TransactionBroadcastProtocol {
+    fn as_ref(&self) -> &str {
+        "/chiral/transaction-broadcast/1.0.0"
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TransactionBroadcastCodec;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransactionBroadcast {
+    pub tx_hash: String,
+    pub signed_tx: String, // RLP-encoded signed transaction as hex string
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransactionBroadcastResponse {
+    pub received: bool,
+}
+
+#[async_trait::async_trait]
+impl rr::Codec for TransactionBroadcastCodec {
+    type Protocol = TransactionBroadcastProtocol;
+    type Request = TransactionBroadcast;
+    type Response = TransactionBroadcastResponse;
+
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Self::Request>
+    where
+        T: FAsyncRead + Unpin + Send,
+    {
+        let data = read_framed(io).await?;
+        serde_json::from_slice(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Self::Response>
+    where
+        T: FAsyncRead + Unpin + Send,
+    {
+        let data = read_framed(io).await?;
+        serde_json::from_slice(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, request: Self::Request) -> std::io::Result<()>
+    where
+        T: FAsyncWrite + Unpin + Send,
+    {
+        let data = serde_json::to_vec(&request).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_framed(io, data).await
+    }
+
+    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, response: Self::Response) -> std::io::Result<()>
+    where
+        T: FAsyncWrite + Unpin + Send,
+    {
+        let data = serde_json::to_vec(&response).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_framed(io, data).await
+    }
+}
+
 use async_std::fs;
 use async_std::path::Path;
 use async_trait::async_trait;
@@ -456,6 +520,7 @@ struct DhtBehaviour {
     proxy_rr: rr::Behaviour<ProxyCodec>,
     webrtc_signaling_rr: rr::Behaviour<WebRTCSignalingCodec>,
     key_request: rr::Behaviour<KeyRequestCodec>,
+    transaction_broadcast_rr: rr::Behaviour<TransactionBroadcastCodec>,
     autonat_client: toggle::Toggle<v2::client::Behaviour>,
     autonat_server: toggle::Toggle<v2::server::Behaviour>,
     relay_client: relay::client::Behaviour,
@@ -518,7 +583,11 @@ pub enum DhtCommand {
     AnnounceTorrent {
         info_hash: String,
     },
-    }
+    BroadcastTransaction {
+        tx_hash: String,
+        signed_tx: String,
+    },
+}
 #[derive(Debug, Clone, Serialize)]
 pub enum DhtEvent {
     // PeerDiscovered(String),
@@ -590,6 +659,11 @@ pub enum DhtEvent {
     PaymentNotificationReceived {
         from_peer: String,
         payload: serde_json::Value,
+    },
+    TransactionReceived {
+        from_peer: String,
+        tx_hash: String,
+        signed_tx: String,
     },
 }
 
@@ -2733,6 +2807,27 @@ async fn run_dht_node(
                             }
                         }
                     }
+                    Some(DhtCommand::BroadcastTransaction { tx_hash, signed_tx }) => {
+                        info!("Broadcasting transaction {} to all connected peers", tx_hash);
+                        let connected = connected_peers.lock().await.clone();
+                        let broadcast_msg = TransactionBroadcast {
+                            tx_hash: tx_hash.clone(),
+                            signed_tx: signed_tx.clone(),
+                        };
+                        
+                        let mut broadcast_count = 0;
+                        for peer in connected {
+                            swarm.behaviour_mut()
+                                .transaction_broadcast_rr
+                                .send_request(&peer, broadcast_msg.clone());
+                            broadcast_count += 1;
+                        }
+                        
+                        info!("Broadcast transaction {} to {} peers", tx_hash, broadcast_count);
+                        let _ = event_tx.send(DhtEvent::Info(
+                            format!("Broadcast transaction {} to {} peers", tx_hash, broadcast_count)
+                        )).await;
+                    }
                     None => {
                         info!("DHT command channel closed; shutting down node task");
                         break 'outer;
@@ -3642,6 +3737,43 @@ async fn run_dht_node(
                             }
                             RREvent::InboundFailure { error, .. } => {
                                 warn!("WebRTC signaling inbound failure: {error:?}");
+                            }
+                            RREvent::ResponseSent { .. } => {}
+                        }
+                    }
+                    SwarmEvent::Behaviour(DhtBehaviourEvent::TransactionBroadcastRr(ev)) => {
+                        use libp2p::request_response::{Event as RREvent, Message};
+                        match ev {
+                            RREvent::Message { peer, message } => match message {
+                                // Transaction broadcast request (receiving a transaction from another peer)
+                                Message::Request { request, channel, .. } => {
+                                    let TransactionBroadcast { tx_hash, signed_tx } = request;
+                                    info!("📡 Received transaction broadcast from {}: {}", peer, tx_hash);
+                                    
+                                    // Send event to frontend so it can forward to local Geth
+                                    let _ = event_tx.send(DhtEvent::TransactionReceived {
+                                        from_peer: peer.to_string(),
+                                        tx_hash: tx_hash.clone(),
+                                        signed_tx: signed_tx.clone(),
+                                    }).await;
+                                    
+                                    // Send confirmation response
+                                    swarm.behaviour_mut().transaction_broadcast_rr
+                                        .send_response(channel, TransactionBroadcastResponse { received: true })
+                                        .unwrap_or_else(|e| error!("Failed to send transaction broadcast response: {e:?}"));
+                                }
+                                // Transaction broadcast response (confirmation that peer received our broadcast)
+                                Message::Response { response, .. } => {
+                                    if response.received {
+                                        debug!("✅ Transaction broadcast confirmed by peer {}", peer);
+                                    }
+                                }
+                            },
+                            RREvent::OutboundFailure { error, .. } => {
+                                warn!("Transaction broadcast outbound failure: {error:?}");
+                            }
+                            RREvent::InboundFailure { error, .. } => {
+                                warn!("Transaction broadcast inbound failure: {error:?}");
                             }
                             RREvent::ResponseSent { .. } => {}
                         }
@@ -5051,7 +5183,11 @@ impl DhtService {
 
         let key_request_protocols =
             std::iter::once((KeyRequestProtocol, rr::ProtocolSupport::Full));
-        let key_request = rr::Behaviour::new(key_request_protocols, rr_cfg);
+        let key_request = rr::Behaviour::new(key_request_protocols, rr_cfg.clone());
+
+        let transaction_broadcast_protocols =
+            std::iter::once((TransactionBroadcastProtocol, rr::ProtocolSupport::Full));
+        let transaction_broadcast_rr = rr::Behaviour::new(transaction_broadcast_protocols, rr_cfg);
 
         let probe_interval = autonat_probe_interval.unwrap_or(Duration::from_secs(30));
         let autonat_client_behaviour = if enable_autonat {
@@ -5108,6 +5244,7 @@ impl DhtService {
             proxy_rr,
             webrtc_signaling_rr,
             key_request,
+            transaction_broadcast_rr,
             autonat_client: autonat_client_toggle,
             autonat_server: autonat_server_toggle,
             relay_client: relay_client_behaviour,
@@ -5645,6 +5782,13 @@ impl DhtService {
     pub async fn announce_torrent(&self, info_hash: String) -> Result<(), String> {
         self.cmd_tx
             .send(DhtCommand::AnnounceTorrent { info_hash })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn broadcast_transaction(&self, tx_hash: String, signed_tx: String) -> Result<(), String> {
+        self.cmd_tx
+            .send(DhtCommand::BroadcastTransaction { tx_hash, signed_tx })
             .await
             .map_err(|e| e.to_string())
     }
