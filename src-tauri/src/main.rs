@@ -1248,11 +1248,13 @@ async fn start_dht_node(
                         }
                     },
                     DhtEvent::TransactionReceived { from_peer, tx_hash, signed_tx } => {
+                        println!("📡 RECEIVED TRANSACTION BROADCAST from peer {}: {}", from_peer, tx_hash);
                         info!("📡 Received transaction broadcast from {}: {}", from_peer, tx_hash);
                         
                         // Forward the transaction to local Geth node
                         match forward_transaction_to_geth(&signed_tx).await {
                             Ok(_) => {
+                                println!("✅ Transaction {} forwarded to local Geth", tx_hash);
                                 info!("✅ Transaction {} forwarded to local Geth", tx_hash);
                                 let payload = serde_json::json!({
                                     "txHash": tx_hash,
@@ -1262,6 +1264,7 @@ async fn start_dht_node(
                                 let _ = app_handle.emit("transaction_received", payload);
                             }
                             Err(e) => {
+                                println!("❌ FAILED to forward transaction {} to Geth: {}", tx_hash, e);
                                 error!("❌ Failed to forward transaction {} to Geth: {}", tx_hash, e);
                             }
                         }
@@ -3801,16 +3804,20 @@ async fn send_chiral_transaction(
     // Broadcast transaction to all connected DHT peers
     let dht_guard = state.dht.lock().await;
     if let Some(ref dht) = *dht_guard {
+        println!("📤 Broadcasting transaction {} to all connected peers...", tx_hash);
         match dht.broadcast_transaction(tx_hash.clone(), signed_tx).await {
             Ok(_) => {
+                println!("✅ Transaction {} broadcast to DHT peers", tx_hash);
                 info!("✅ Transaction {} broadcast to DHT peers", tx_hash);
             }
             Err(e) => {
+                println!("⚠️ Failed to broadcast transaction {} to DHT peers: {}", tx_hash, e);
                 warn!("⚠️ Failed to broadcast transaction {} to DHT peers: {}", tx_hash, e);
                 // Don't fail the entire transaction if broadcast fails
             }
         }
     } else {
+        println!("⚠️ DHT not available, transaction {} not broadcast to peers", tx_hash);
         warn!("⚠️ DHT not available, transaction {} not broadcast to peers", tx_hash);
     }
 

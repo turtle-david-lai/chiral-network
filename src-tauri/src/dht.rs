@@ -2808,8 +2808,12 @@ async fn run_dht_node(
                         }
                     }
                     Some(DhtCommand::BroadcastTransaction { tx_hash, signed_tx }) => {
+                        println!("📤 [DHT] Broadcasting transaction {} to all connected peers", tx_hash);
                         info!("Broadcasting transaction {} to all connected peers", tx_hash);
                         let connected = connected_peers.lock().await.clone();
+                        
+                        println!("📊 [DHT] Found {} connected peers", connected.len());
+                        
                         let broadcast_msg = TransactionBroadcast {
                             tx_hash: tx_hash.clone(),
                             signed_tx: signed_tx.clone(),
@@ -2817,12 +2821,14 @@ async fn run_dht_node(
                         
                         let mut broadcast_count = 0;
                         for peer in connected {
+                            println!("  → Sending to peer: {}", peer);
                             swarm.behaviour_mut()
                                 .transaction_broadcast_rr
                                 .send_request(&peer, broadcast_msg.clone());
                             broadcast_count += 1;
                         }
                         
+                        println!("✅ [DHT] Broadcast transaction {} to {} peers", tx_hash, broadcast_count);
                         info!("Broadcast transaction {} to {} peers", tx_hash, broadcast_count);
                         let _ = event_tx.send(DhtEvent::Info(
                             format!("Broadcast transaction {} to {} peers", tx_hash, broadcast_count)
@@ -3748,6 +3754,7 @@ async fn run_dht_node(
                                 // Transaction broadcast request (receiving a transaction from another peer)
                                 Message::Request { request, channel, .. } => {
                                     let TransactionBroadcast { tx_hash, signed_tx } = request;
+                                    println!("📡 [DHT] RECEIVED transaction broadcast from {}: {}", peer, tx_hash);
                                     info!("📡 Received transaction broadcast from {}: {}", peer, tx_hash);
                                     
                                     // Send event to frontend so it can forward to local Geth
@@ -3757,6 +3764,8 @@ async fn run_dht_node(
                                         signed_tx: signed_tx.clone(),
                                     }).await;
                                     
+                                    println!("✅ [DHT] Sent TransactionReceived event to main event loop");
+                                    
                                     // Send confirmation response
                                     swarm.behaviour_mut().transaction_broadcast_rr
                                         .send_response(channel, TransactionBroadcastResponse { received: true })
@@ -3765,14 +3774,17 @@ async fn run_dht_node(
                                 // Transaction broadcast response (confirmation that peer received our broadcast)
                                 Message::Response { response, .. } => {
                                     if response.received {
+                                        println!("✅ [DHT] Transaction broadcast confirmed by peer {}", peer);
                                         debug!("✅ Transaction broadcast confirmed by peer {}", peer);
                                     }
                                 }
                             },
                             RREvent::OutboundFailure { error, .. } => {
+                                println!("⚠️ [DHT] Transaction broadcast outbound failure: {error:?}");
                                 warn!("Transaction broadcast outbound failure: {error:?}");
                             }
                             RREvent::InboundFailure { error, .. } => {
+                                println!("⚠️ [DHT] Transaction broadcast inbound failure: {error:?}");
                                 warn!("Transaction broadcast inbound failure: {error:?}");
                             }
                             RREvent::ResponseSent { .. } => {}
