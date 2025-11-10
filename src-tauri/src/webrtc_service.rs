@@ -20,6 +20,7 @@ use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -197,6 +198,21 @@ pub struct WebRTCService {
 }
 
 impl WebRTCService {
+    fn default_rtc_configuration() -> RTCConfiguration {
+        RTCConfiguration {
+            ice_servers: vec![
+                RTCIceServer {
+                    urls: vec!["stun:stun.l.google.com:19302".to_string()],
+                    ..Default::default()
+                },
+                RTCIceServer {
+                    urls: vec!["stun:global.stun.twilio.com:3478".to_string()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
     pub async fn new(
         app_handle: tauri::AppHandle,
         file_transfer_service: Arc<FileTransferService>,
@@ -331,7 +347,7 @@ impl WebRTCService {
         let api = APIBuilder::new().build();
 
         // Create peer connection
-        let config = RTCConfiguration::default();
+        let config = Self::default_rtc_configuration();
         let peer_connection = match api.new_peer_connection(config).await {
             Ok(pc) => Arc::new(pc),
             Err(e) => {
@@ -1256,7 +1272,7 @@ impl WebRTCService {
         let api = APIBuilder::new().build();
 
         // Create peer connection
-        let config = RTCConfiguration::default();
+        let config = Self::default_rtc_configuration();
         let peer_connection: Arc<RTCPeerConnection> = match api.new_peer_connection(config).await {
             Ok(pc) => Arc::new(pc),
             Err(e) => {
@@ -1427,7 +1443,7 @@ impl WebRTCService {
         let api = APIBuilder::new().build();
 
         // Create peer connection
-        let config = RTCConfiguration::default();
+        let config = Self::default_rtc_configuration();
         let peer_connection: Arc<RTCPeerConnection> = match api.new_peer_connection(config).await {
             Ok(pc) => Arc::new(pc),
             Err(e) => {
