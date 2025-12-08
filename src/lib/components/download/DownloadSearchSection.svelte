@@ -786,8 +786,8 @@
           // The download is already started in the backend, and will be tracked via torrent_event listener
           // So we don't need to dispatch the download event here
         } else if (pendingTorrentType === 'magnet') {
-          // For magnet links
-          await invoke('download', { identifier: pendingTorrentIdentifier })
+          // For magnet links - use the dedicated magnet download command
+          await invoke('download_torrent_from_magnet', { magnetLink: pendingTorrentIdentifier })
           const urlParams = new URLSearchParams(pendingTorrentIdentifier.split('?')[1]);
           infoHash = urlParams.get('xt')?.replace('urn:btih:', '');
           fileName = urlParams.get('dn') || 'Magnet Link Download';
@@ -795,7 +795,12 @@
           // So we don't need to dispatch the download event here
         } else {
           // For BitTorrent from metadata (already on the network)
-          await invoke('download', { identifier: selectedFile?.infoHash })
+          // Construct a proper magnet link from the info hash
+          const trackerParams = selectedFile?.trackers && selectedFile.trackers.length > 0
+            ? '&tr=' + selectedFile.trackers.join('&tr=')
+            : '';
+          const magnetLink = `magnet:?xt=urn:btih:${selectedFile?.infoHash}${trackerParams}`;
+          await invoke('download_torrent_from_magnet', { magnetLink })
           infoHash = selectedFile?.infoHash;
           fileName = selectedFile?.fileName || 'BitTorrent Download';
           // The download is already started in the backend, and will be tracked via torrent_event listener

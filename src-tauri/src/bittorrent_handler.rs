@@ -465,6 +465,21 @@ pub async fn new_with_state(
         folder: Some(download_directory.clone()),
     });
 
+    // Configure default trackers for peer discovery
+    // These trackers will be used for all torrents, enabling seeders to be found
+    let default_trackers = [
+        "udp://tracker.openbittorrent.com:80/announce",
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://exodus.desync.com:6969/announce",
+    ];
+    for tracker_url in &default_trackers {
+        if let Ok(url) = tracker_url.parse::<url::Url>() {
+            opts.trackers.insert(url);
+        }
+    }
+    info!("Configured {} default BitTorrent trackers", opts.trackers.len());
+
     let session = Session::new_with_opts(download_directory.clone(), opts).await.map_err(|e| {
         error!("Session initialization failed: {}", e);
         BitTorrentError::SessionInit {
@@ -870,6 +885,7 @@ pub async fn new_with_state(
         }
 
         // Add the torrent to the session
+        info!("Adding torrent to rqbit session...");
         let add_torrent_response = self
             .rqbit_session
             .add_torrent(add_torrent, Some(add_opts))
@@ -878,10 +894,15 @@ pub async fn new_with_state(
                 error!("Failed to add torrent to session: {}", e);
                 Self::map_generic_error(e)
             })?;
+        info!("Torrent added to session, getting handle...");
 
         let handle = add_torrent_response
             .into_handle()
-            .ok_or(BitTorrentError::HandleUnavailable)?;
+            .ok_or_else(|| {
+                error!("Failed to get torrent handle - into_handle() returned None");
+                BitTorrentError::HandleUnavailable
+            })?;
+        info!("Got torrent handle successfully");
 
         // Get the info_hash from the handle (works for both magnets and .torrent files)
         let torrent_info_hash = handle.info_hash();
